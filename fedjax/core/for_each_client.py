@@ -87,14 +87,14 @@ class ForEachClientJitBackend(ForEachClientBackend):
     jit_client_step = jax.jit(client_step)
     jit_client_final = jax.jit(client_final)
 
-    def run(shared_input, clients):
+    def run(shared_input, clients, server_info):
       for client_id, client_batches, client_input in clients:
         step_results = []
-        state = jit_client_init(shared_input, client_input)
+        state = jit_client_init(shared_input, client_input, server_info)
         for batch in client_batches:
-          state, step_result = jit_client_step(state, batch)
+          state, step_result = jit_client_step(state, batch, server_info)
           step_results.append(step_result)
-        output = jit_client_final(shared_input, state)
+        output = jit_client_final(shared_input, state, server_info)
         yield client_id, output, step_results
 
     return run
@@ -130,12 +130,12 @@ class ForEachClientDebugBackend(ForEachClientBackend):
                client_final: ClientFinal) -> ForEachClient:
     """Creates a `for_each_client` function useful during debugging."""
 
-    def run(shared_input, clients):
+    def run(shared_input, clients, server_info):
       with jax.disable_jit():
         for client_id, client_batches, client_input in clients:
           step_results = []
           try:
-            state = client_init(shared_input, client_input)
+            state = client_init(shared_input, client_input, server_info)
           except Exception as e:
             raise ForEachClientError(
                 e,
@@ -146,7 +146,7 @@ class ForEachClientDebugBackend(ForEachClientBackend):
                 client_input=client_input) from e
           for batch in client_batches:
             try:
-              state, step_result = client_step(state, batch)
+              state, step_result = client_step(state, batch, server_info)
             except Exception as e:
               raise ForEachClientError(
                   e,
@@ -157,7 +157,7 @@ class ForEachClientDebugBackend(ForEachClientBackend):
                   batch=batch) from e
             step_results.append(step_result)
           try:
-            output = client_final(shared_input, state)
+            output = client_final(shared_input, state, server_info)
           except Exception as e:
             raise ForEachClientError(
                 e,
@@ -293,17 +293,17 @@ class ForEachClientPmapBackend(ForEachClientBackend):
 
     p_client_final = jax.pmap(client_final, in_axes=(None, 0))
 
-    def run(shared_input, clients):
+    def run(shared_input, clients, server_info):
       for block in _blockify(clients, block_size):
         p_state = p_client_init(
-            shared_input, jax.device_put_sharded(block.client_input, devices))
+            shared_input, jax.device_put_sharded(block.client_input, devices), server_info)
         p_step_results = []
         for p_batch, p_mask in block.masked_batches:
           p_state, p_step_result = p_client_step(
               p_state, jax.device_put_sharded(p_batch, devices),
-              jax.device_put_sharded(p_mask, devices))
+              jax.device_put_sharded(p_mask, devices), server_info)
           p_step_results.append(p_step_result)
-        p_client_output = p_client_final(shared_input, p_state)
+        p_client_output = p_client_final(shared_input, p_state, server_info)
         for i in range(len(block.client_id)):
           if not block.client_mask[i]:
             continue
@@ -508,14 +508,14 @@ def for_each_client(client_init: ClientInit,
   if with_step_result:
     return for_each_client_backend_(client_init, client_step, client_final)
 
-  def client_step_with_result(client_step_state, batch):
-    return client_step(client_step_state, batch), ()
+  def client_step_with_result(client_step_state, batch, server_info):
+    return client_step(client_step_state, batch, server_info), ()
 
   func = for_each_client_backend_(client_init, client_step_with_result,
                                   client_final)
 
-  def run(shared_input, clients):
-    for client_id, client_output, _ in func(shared_input, clients):
+  def run(shared_input, clients, server_info):
+    for client_id, client_output, _ in func(shared_input, clients, server_info):
       yield client_id, client_output
 
   return run

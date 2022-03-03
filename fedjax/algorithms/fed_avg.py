@@ -42,6 +42,7 @@ from fedjax.core.typing import Params
 from fedjax.core.typing import PRNGKey
 
 import jax
+import optax
 
 Grads = Params
 
@@ -49,7 +50,7 @@ Grads = Params
 def create_train_for_each_client(grad_fn, client_optimizer):
   """Builds client_init, client_step, client_final for for_each_client."""
 
-  def client_init(server_params, client_rng):
+  def client_init(server_params, client_rng, server_info):
     opt_state = client_optimizer.init(server_params)
     client_step_state = {
         'params': server_params,
@@ -58,12 +59,19 @@ def create_train_for_each_client(grad_fn, client_optimizer):
     }
     return client_step_state
 
-  def client_step(client_step_state, batch):
+  def client_step(client_step_state, batch, server_info):
     rng, use_rng = jax.random.split(client_step_state['rng'])
     grads = grad_fn(client_step_state['params'], batch, use_rng)
-    opt_state, params = client_optimizer.apply(grads,
-                                               client_step_state['opt_state'],
-                                               client_step_state['params'])
+
+    client_opt_params = server_info.get('client_opt_params', {})
+    client_step_state['opt_state'].hyperparams.update(client_opt_params)
+
+    updates, opt_state = client_optimizer.update(
+        grads,
+        client_step_state['opt_state'],
+        client_step_state['params'])
+    params = optax.apply_updates(client_step_state['params'], updates)
+
     next_client_step_state = {
         'params': params,
         'opt_state': opt_state,
@@ -71,7 +79,7 @@ def create_train_for_each_client(grad_fn, client_optimizer):
     }
     return next_client_step_state
 
-  def client_final(server_params, client_step_state):
+  def client_final(server_params, client_step_state, server_info):
     delta_params = jax.tree_util.tree_multimap(lambda a, b: a - b,
                                                server_params,
                                                client_step_state['params'])
@@ -120,7 +128,8 @@ def federated_averaging(
   def apply(
       server_state: ServerState,
       clients: Sequence[Tuple[federated_data.ClientId,
-                              client_datasets.ClientDataset, PRNGKey]]
+                              client_datasets.ClientDataset, PRNGKey]],
+      server_info
   ) -> Tuple[ServerState, Mapping[federated_data.ClientId, Any]]:
     client_num_examples = {cid: len(cds) for cid, cds, _ in clients}
     batch_clients = [(cid, cds.shuffle_repeat_batch(client_batch_hparams), crng)
@@ -132,7 +141,7 @@ def federated_averaging(
     delta_params_sum = tree_util.tree_zeros_like(server_state.params)
     num_examples_sum = 0.
     for client_id, delta_params in train_for_each_client(
-        server_state.params, batch_clients):
+        server_state.params, batch_clients, server_info):
       num_examples = client_num_examples[client_id]
       delta_params_sum = tree_util.tree_add(
           delta_params_sum, tree_util.tree_weight(delta_params, num_examples))
