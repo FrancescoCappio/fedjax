@@ -148,8 +148,14 @@ def federated_averaging(
       num_examples_sum += num_examples
       # We record the l2 norm of client updates as an example, but it is not
       # required for the algorithm.
+      # we need to save client params for debugging reasons
+      client_params = jax.tree_util.tree_map(lambda s, d: s - d,
+        server_state.params,
+        delta_params)
+
       client_diagnostics[client_id] = {
-          'delta_l2_norm': tree_util.tree_l2_norm(delta_params)
+          'delta_l2_norm': tree_util.tree_l2_norm(delta_params),
+          'client_params': client_params
       }
     mean_delta_params = tree_util.tree_inverse_weight(delta_params_sum,
                                                       num_examples_sum)
